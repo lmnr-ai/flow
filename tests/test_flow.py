@@ -1,3 +1,4 @@
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
@@ -9,6 +10,13 @@ from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProces
 
 from src.lmnr_flow.flow import Context, Flow, NextTask, StreamChunk, TaskOutput
 
+# Configure logging with thread information
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(threadName)s] %(levelname)s %(filename)s:%(lineno)d: %(message)s",
+    force=True,
+)
+
 
 @pytest.fixture(autouse=True)
 def setup_tracer():
@@ -16,20 +24,20 @@ def setup_tracer():
     tracer_provider = TracerProvider()
     # Optional: Add console exporter to see the traces in the console
     tracer_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-    
+
     # Set the tracer provider for the wrapper
     wrapper = TracerWrapper()
     wrapper.tracer_provider = tracer_provider
-    
+
     yield
-    
+
     # Cleanup after tests
     wrapper.tracer_provider = None
 
 
 @pytest.fixture(autouse=True)
 def mock_tracer():
-    with patch('lmnr.openllmetry_sdk.tracing.tracing.TracerWrapper.get_tracer'):
+    with patch("lmnr.openllmetry_sdk.tracing.tracing.TracerWrapper.get_tracer"):
         yield
 
 
@@ -38,14 +46,14 @@ def mock_start_as_current_span():
     class MockContextManager:
         def __init__(self, func, input=None):
             self.func = func
-            
+
         def __enter__(self):
             return self.func
-            
+
         def __exit__(self, exc_type, exc_val, exc_tb):
             pass
-    
-    with patch('lmnr.Laminar.start_as_current_span', side_effect=MockContextManager):
+
+    with patch("lmnr.Laminar.start_as_current_span", side_effect=MockContextManager):
         yield
 
 
@@ -59,14 +67,14 @@ def thread_pool():
 def flow(thread_pool):
     return Flow(thread_pool)
 
+
 @pytest.fixture
 def flow_with_state(thread_pool):
     context = Context()
-    context.from_dict({
-        "task1": "result1"
-    })
+    context.from_dict({"task1": "result1"})
 
     return Flow(thread_pool, context)
+
 
 def test_simple_task_execution(flow):
     # Test single task that returns no next tasks
@@ -224,7 +232,9 @@ def test_context_get_with_fallback(flow):
         flow.context.get("non_existent_key")
     assert "Key non_existent_key not found in context" in str(exc_info.value)
 
-    fallback_value = flow.context.get("non_existent_key_with_default", default="fallback_value")
+    fallback_value = flow.context.get(
+        "non_existent_key_with_default", default="fallback_value"
+    )
     assert fallback_value == "fallback_value"
 
 
@@ -343,6 +353,7 @@ def test_cycle(flow):
     result = flow.run("task1", inputs={"count": 0})
     assert result == {"task3": "final"}
 
+
 def test_state_loading(flow_with_state):
     # Test that state is loaded correctly
     flow_with_state.add_task("task2", lambda ctx: TaskOutput("result2"))
@@ -350,6 +361,7 @@ def test_state_loading(flow_with_state):
 
     assert flow_with_state.context.get("task1") == "result1"
     assert flow_with_state.context.get("task2") == "result2"
+
 
 def test_inputs_to_next_tasks(flow):
     # Test that inputs are passed to next tasks
@@ -366,6 +378,7 @@ def test_inputs_to_next_tasks(flow):
     result = flow.run("task1")
     assert result == {"task2": "result2"}
 
+
 def test_inputs_to_next_tasks_with_no_inputs(flow):
     # Test that inputs are passed to next tasks
     def task1(ctx):
@@ -381,6 +394,7 @@ def test_inputs_to_next_tasks_with_no_inputs(flow):
     result = flow.run("task1")
     assert result == {"task2": "result2"}
 
+
 def test_inputs_to_first_task(flow):
     # Test that inputs are passed to the first task
     def task1(ctx, inputs):
@@ -390,6 +404,7 @@ def test_inputs_to_first_task(flow):
     flow.add_task("task1", task1)
     result = flow.run("task1", inputs={"input1": "value1"})
     assert result == {"task1": "result1"}
+
 
 def test_push_the_same_task_multiple_times(flow):
     # Test that the same task can be pushed multiple times
@@ -410,16 +425,20 @@ def test_push_the_same_task_multiple_times(flow):
     assert count == 3
     assert result == {"task1": "result1"}
 
+
 def test_map_reduce(flow):
     # Test map reduce functionality
     def task1(ctx):
         ctx.set("collector", [])
 
-        return TaskOutput("result1", [
-            NextTask("task2", spawn_another=True),
-            NextTask("task2", spawn_another=True),
-            NextTask("task2", spawn_another=True)
-        ])
+        return TaskOutput(
+            "result1",
+            [
+                NextTask("task2", spawn_another=True),
+                NextTask("task2", spawn_another=True),
+                NextTask("task2", spawn_another=True),
+            ],
+        )
 
     def task2(ctx):
         collector = ctx.get("collector")
@@ -438,3 +457,110 @@ def test_map_reduce(flow):
 
     result = flow.run("task1")
     assert result == {"task3": ["result2", "result2", "result2"]}
+
+
+def test_task_decorator(flow):
+    # Test task decorator
+    @flow.task("decorated_task")
+    def action(ctx) -> TaskOutput:
+        return TaskOutput("result")
+
+    result = flow.run("decorated_task")
+    assert result == {"decorated_task": "result"}
+    assert flow.context.get("decorated_task") == "result"
+
+
+def test_task_decorator_with_inputs(flow):
+    # Test task decorator with inputs
+    @flow.task("decorated_task")
+    def action(ctx, inputs) -> TaskOutput:
+        assert inputs == {"input1": "value1"}
+        return TaskOutput("result")
+
+    result = flow.run("decorated_task", inputs={"input1": "value1"})
+    assert result == {"decorated_task": "result"}
+
+
+def test_task_decorator_with_next_tasks(flow):
+    # Test task decorator with next tasks
+    @flow.task("task1")
+    def task1(ctx) -> TaskOutput:
+        return TaskOutput("result1", [NextTask("task2")])
+
+    @flow.task("task2")
+    def task2(ctx) -> TaskOutput:
+        assert ctx.get("task1") == "result1"
+        return TaskOutput("result2")
+
+    result = flow.run("task1")
+    assert result == {"task2": "result2"}
+    assert flow.context.get("task1") == "result1"
+    assert flow.context.get("task2") == "result2"
+
+
+def test_task_decorator_error_handling(flow):
+    # Test error handling in decorated task
+    @flow.task("failing_task")
+    def failing_task(ctx) -> TaskOutput:
+        raise ValueError("Task failed")
+
+    with pytest.raises(Exception) as exc_info:
+        flow.run("failing_task")
+
+    assert "Task failed" in str(exc_info.value)
+
+
+def test_task_decorator_streaming(flow):
+    # Test streaming with decorated task
+    @flow.task("task1")
+    def task1(ctx) -> TaskOutput:
+        for i in range(3):
+            ctx.get_stream().put(StreamChunk("task1", i))
+        return TaskOutput("result1")
+
+    results = []
+    for stream_chunk in flow.stream("task1"):
+        results.append((stream_chunk.task_id, stream_chunk.value))
+
+    assert len(results) == 4  # 3 stream chunks + final result
+    assert ("task1", 0) in results
+    assert ("task1", 1) in results
+    assert ("task1", 2) in results
+    assert ("task1", "result1") in results
+
+
+def test_task_error_propagation(flow):
+    import logging
+
+    logging.basicConfig(level=logging.DEBUG)
+    logger = logging.getLogger(__name__)
+
+    @flow.task("task1")
+    def task1(ctx) -> TaskOutput:
+        logger.debug("Executing task1")
+        import threading
+
+        logger.debug(f"task1 running in thread: {threading.current_thread().name}")
+        result = TaskOutput("result1", [NextTask("task2")])
+        logger.debug("task1 completed")
+        return result
+
+    @flow.task("task2")
+    def task2(ctx) -> TaskOutput:
+        logger.debug("Executing task2")
+        import threading
+
+        logger.debug(f"task2 running in thread: {threading.current_thread().name}")
+
+        raise ValueError("Task2 failed")
+
+    @flow.task("task3")
+    def task3(ctx) -> TaskOutput:
+        logger.debug("Executing task3")
+        return TaskOutput("result3")  # Should not be executed
+
+    with pytest.raises(Exception) as exc_info:
+        flow.run("task1")
+
+    assert "Task2 failed" in str(exc_info.value)
+    assert flow.context.get("task1") == "result1"
